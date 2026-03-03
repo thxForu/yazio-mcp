@@ -29,6 +29,20 @@ export const OptionalQueryInputSchema = z.object({
   limit: LimitSchema
 });
 
+export const SearchByBarcodeInputSchema = z.object({
+  ean: z.string().describe('EAN/UPC barcode string (e.g. "4005500068709")'),
+  sex: z.enum(["male", "female"]).default("male").optional(),
+  countries: z.array(z.string()).default(["US"]).optional().describe('Array of country codes'),
+  locales: z.array(z.string()).default(["en_US"]).optional().describe('Array of locale codes'),
+});
+
+export const ScanBarcodeImageInputSchema = z.object({
+  image: z.string().describe('Base64-encoded image of a barcode'),
+  sex: z.enum(["male", "female"]).default("male").optional(),
+  countries: z.array(z.string()).default(["US"]).optional().describe('Array of country codes'),
+  locales: z.array(z.string()).default(["en_US"]).optional().describe('Array of locale codes'),
+});
+
 export const EmptyInputSchema = z.object({});
 
 export const GetFoodEntriesInputSchema = DateInputSchema;
@@ -94,3 +108,5 @@ export type RemoveConsumedItemInput = z.infer<typeof RemoveConsumedItemInputSche
 export type AddWaterIntakeInput = z.infer<typeof AddWaterIntakeInputSchema>;
 export type GetDietaryPreferencesInput = z.infer<typeof GetDietaryPreferencesInputSchema>;
 export type GetUserGoalsInput = z.infer<typeof GetUserGoalsInputSchema>;
+export type SearchByBarcodeInput = z.infer<typeof SearchByBarcodeInputSchema>;
+export type ScanBarcodeImageInput = z.infer<typeof ScanBarcodeImageInputSchema>;

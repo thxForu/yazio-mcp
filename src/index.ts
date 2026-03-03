@@ -24,6 +24,8 @@ import {
   AddWaterIntakeInputSchema,
   GetDietaryPreferencesInputSchema,
   GetUserGoalsInputSchema,
+  SearchByBarcodeInputSchema,
+  ScanBarcodeImageInputSchema,
   type GetFoodEntriesInput,
   type GetDailySummaryInput,
   type GetWaterIntakeInput,
@@ -34,6 +36,8 @@ import {
   type AddConsumedItemInput,
   type RemoveConsumedItemInput,
   type AddWaterIntakeInput,
+  type SearchByBarcodeInput,
+  type ScanBarcodeImageInput,
 } from './schemas.js';
 import type {
   YazioExerciseOptions,
@@ -290,6 +294,38 @@ class YazioMcpServer {
     );
 
     this.server.registerTool(
+      'search_by_barcode',
+      {
+        description: 'Search for a food product by its EAN/UPC barcode number. Searches the Yazio database and filters results by matching EAN code.',
+        inputSchema: SearchByBarcodeInputSchema,
+        annotations: {
+          readOnlyHint: true,
+          idempotentHint: true,
+          openWorldHint: true,
+        },
+      },
+      async (args: SearchByBarcodeInput) => {
+        return await this.searchByBarcode(args);
+      }
+    );
+
+    this.server.registerTool(
+      'scan_barcode_image',
+      {
+        description: 'Scan a barcode from an image and look up the product in Yazio. Accepts a base64-encoded image, decodes the barcode using zbarimg, and returns the matching product with nutritional info. Use this when you receive a photo of a barcode/product label and need to identify it — no vision model required.',
+        inputSchema: ScanBarcodeImageInputSchema,
+        annotations: {
+          readOnlyHint: true,
+          idempotentHint: true,
+          openWorldHint: true,
+        },
+      },
+      async (args: ScanBarcodeImageInput) => {
+        return await this.scanBarcodeImage(args);
+      }
+    );
+
+    this.server.registerTool(
       'get_product',
       {
         description: 'Get detailed information about a specific product by ID',
@@ -350,6 +386,7 @@ class YazioMcpServer {
         return await this.addUserWaterIntake(args);
       }
     );
+
   }
 
   private setupPromptHandlers(): void {
@@ -611,6 +648,122 @@ Example:
       };
     } catch (error) {
       throw new Error(`Failed to search products: ${error}`);
+    }
+  }
+
+  private async scanBarcodeImage(args: ScanBarcodeImageInput) {
+    const { execSync } = await import('child_process');
+    const { writeFileSync, unlinkSync } = await import('fs');
+    const { tmpdir } = await import('os');
+    const { join } = await import('path');
+
+    // Strip data URL prefix if present
+    let base64Data = args.image;
+    const dataUrlMatch = base64Data.match(/^data:[^;]+;base64,(.+)$/);
+    if (dataUrlMatch) {
+      base64Data = dataUrlMatch[1];
+    }
+
+    // Write base64 image to temp file
+    const tmpFile = join(tmpdir(), `yazio-barcode-${Date.now()}.png`);
+    try {
+      writeFileSync(tmpFile, Buffer.from(base64Data, 'base64'));
+
+      // Decode barcode using zbarimg
+      let zbarOutput: string;
+      try {
+        zbarOutput = execSync(`zbarimg --raw -q "${tmpFile}"`, {
+          timeout: 10000,
+          encoding: 'utf8',
+        }).trim();
+      } catch (zbarError: any) {
+        // zbarimg exits with code 4 when no barcode found
+        if (zbarError.status === 4) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: 'No barcode detected in the image. Make sure the barcode is clearly visible and well-lit.',
+            }],
+          };
+        }
+        throw new Error(`zbarimg failed: ${zbarError.message}. Make sure zbarimg is installed (apt-get install zbar-tools).`);
+      }
+
+      // Parse EAN codes (zbarimg can return multiple lines)
+      const codes = zbarOutput.split('\n').filter(Boolean);
+      if (codes.length === 0) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: 'No barcode detected in the image.',
+          }],
+        };
+      }
+
+      // Search for the first valid barcode
+      const ean = codes[0];
+      const result = await this.searchByBarcode({ ean });
+
+      // Prepend the detected EAN to the result
+      const resultText = result.content[0].text;
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `Detected barcode: ${ean}\n\n${resultText}`,
+        }],
+      };
+    } finally {
+      try { unlinkSync(tmpFile); } catch { /* ignore cleanup errors */ }
+    }
+  }
+
+  private async searchByBarcode(args: SearchByBarcodeInput) {
+    const client = await this.ensureAuthenticated();
+
+    try {
+      // Search using EAN as query - Yazio search often matches barcodes
+      const products = await client.products.search({ query: args.ean });
+
+      // If we got results, check each product for matching EAN
+      if (products && Array.isArray(products) && products.length > 0) {
+        // Get full details for top results to check EAN fields
+        const detailedResults = [];
+        for (const product of products.slice(0, 5)) {
+          try {
+            const detail = await client.products.get(product.product_id);
+            if (detail && detail.eans && detail.eans.includes(args.ean)) {
+              detailedResults.push(detail);
+            }
+          } catch {
+            // Skip products that fail to fetch
+          }
+        }
+
+        if (detailedResults.length > 0) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: `Found ${detailedResults.length} product(s) matching barcode ${args.ean}:\n\n${JSON.stringify(detailedResults, null, 2)}`,
+              },
+            ],
+          };
+        }
+      }
+
+      // Fallback: return search results even without exact EAN match
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: products && Array.isArray(products) && products.length > 0
+              ? `No exact barcode match found for ${args.ean}, but here are search results:\n\n${JSON.stringify(products, null, 2)}`
+              : `No products found for barcode ${args.ean}`,
+          },
+        ],
+      };
+    } catch (error) {
+      throw new Error(`Failed to search by barcode: ${error}`);
     }
   }
 
